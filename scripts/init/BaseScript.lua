@@ -13,7 +13,7 @@ local bNoCheck = true
 
 --Time in days
 local TimeMultiplier = 1
-local TOTAL_PREGNANCY_TIME = 0.03 * TimeMultiplier
+local TOTAL_PREGNANCY_TIME = 0.024 * TimeMultiplier
 local TOTAL_CHILDHOOD_TIME = 0.09 * TimeMultiplier
 local TOTAL_ADULTHOOD_TIME = 100 * TimeMultiplier
 
@@ -39,6 +39,7 @@ MODSTRING_ImPregnant = MODSTRING_ImPregnant or  "I think I'm pregnant..."
 MODSTRING_FamilyTree = MODSTRING_FamilyTree or "Family Tree of "
 MODSTRING_Deceased = MODSTRING_Deceased or " (Dead)"
 MODSTRING_Unknown = MODSTRING_Unknown or "Unknown"
+MODSTRING_Miscarriage = MODSTRING_Miscarriage or "I lost the baby..."
 
 
 local math = math
@@ -474,6 +475,10 @@ local function CoupleCantReproduce(Mother, Father)
 	if Mother:getAppearanceData().fdata.ComeOfAgeTime then return "Not adult" end
 	if Father:getAppearanceData().fdata.ComeOfAgeTime then return "Not adult" end
 	
+	if Mother.medical:isReallyHungry() or Father.medical:isReallyHungry() then
+		return "Too hungry"
+	end
+	
 	local MotherAncestors = GetAncestorList(Mother, 4, nil, bHappyFamiliesDebugMode)
 	local FatherAncestors = GetAncestorList(Father, 4, nil, bHappyFamiliesDebugMode)
 	
@@ -895,12 +900,15 @@ local function MixAppearances(M, F, C)
 	local SkinColour_M = M.appearanceData.vecdata["Skin Tone"]
 	local SkinColour_F = F.appearanceData.vecdata["Skin Tone"]
 	local SkinColour_C = C.appearanceData.vecdata["Skin Tone"]
-	
-	local LerpVal = math.random()
+
+	-- 25% probabilidad de heredar el tono exacto de la madre, 25% del padre, 50% mezcla intermedia
+	local roll = math.random()
+	local LerpVal = (roll < 0.25) and 0.0 or ((roll < 0.50) and 1.0 or math.random())
+
 	SkinColour_C.x = LerpFloat(SkinColour_M.x, SkinColour_F.x, LerpVal)
 	SkinColour_C.y = LerpFloat(SkinColour_M.y, SkinColour_F.y, LerpVal)
 	SkinColour_C.z = LerpFloat(SkinColour_M.z, SkinColour_F.z, LerpVal)
-	
+
 	C.appearanceData.vecdata["Skin Tone"] = SkinColour_C	
 	
 	--C.characterHeight = LerpFloat(M.characterHeight, F.characterHeight, math.random())
@@ -998,14 +1006,86 @@ local function MakeChild(Mother, Father)
 		AppearanceF, 
 		AppearanceC
 	)
+
+	-- 1. Generar genes y guardar sdata reasignándolo explícitamente
+	if HF_GenerateGenes then
+		local genesStr = HF_GenerateGenes(Mother, Father, Child)
+		if genesStr and genesStr ~= "" then
+			local sdata = AppearanceC.appearanceData.sdata
+			sdata.HF_Genes = genesStr
+			AppearanceC.appearanceData.sdata = sdata
+		end
+	end
+
+	-- 2. Aplicar la apariencia base ANTES de escribir ComeOfAgeTime y sliders de crecimiento
+	Child:setAppearanceData(AppearanceC.appearanceData)
 	
+	-- 3. Ahora sí escribir edad, sliders de crecimiento, stats y aplicar el primer tick de crecimiento
 	SetParentsAndAge(Mother, Father, Child)
 	CopyFinalSliderValuesAndSetSliders(Mother, Father, Child)
 	MixStats(Mother, Father, Child)
 	GrowCharacter(Child)
-	Child:setAppearanceData(AppearanceC.appearanceData)
 	
 	return Child
+end
+
+local LastPregnancyHunger = {}
+
+local function ApplyPregnancyDebuffs(Mother, Lerp)
+	local fdata = Mother:getAppearance().appearanceData.fdata
+	local stats = Mother.stats
+
+	-- Destreza: 0% a 50%
+	local baseDex = stats._dexterity + (fdata.Preg_Debuff_Dex or 0)
+	local debuffDex = baseDex * (0.50 * Lerp)
+	stats._dexterity = math.max(0, baseDex - debuffDex)
+	fdata.Preg_Debuff_Dex = debuffDex
+
+	-- Sigilo: 0% a 50%
+	local baseStealth = stats.stealth + (fdata.Preg_Debuff_Stealth or 0)
+	local debuffStealth = baseStealth * (0.50 * Lerp)
+	stats.stealth = math.max(0, baseStealth - debuffStealth)
+	fdata.Preg_Debuff_Stealth = debuffStealth
+
+	-- Resistencia (Toughness): 0% a 25%
+	local baseTough = stats._toughness + (fdata.Preg_Debuff_Tough or 0)
+	local debuffTough = baseTough * (0.25 * Lerp)
+	stats._toughness = math.max(0, baseTough - debuffTough)
+	fdata.Preg_Debuff_Tough = debuffTough
+end
+
+local function ClearPregnancyDebuffs(Mother)
+	local AppDataBase = Mother:getAppearance()
+	local fdata = AppDataBase.appearanceData.fdata
+	local stats = Mother.stats
+
+	if fdata.Preg_Debuff_Dex then
+		stats._dexterity = stats._dexterity + fdata.Preg_Debuff_Dex
+		fdata:remove("Preg_Debuff_Dex")
+	end
+	if fdata.Preg_Debuff_Stealth then
+		stats.stealth = stats.stealth + fdata.Preg_Debuff_Stealth
+		fdata:remove("Preg_Debuff_Stealth")
+	end
+	if fdata.Preg_Debuff_Tough then
+		stats._toughness = stats._toughness + fdata.Preg_Debuff_Tough
+		fdata:remove("Preg_Debuff_Tough")
+	end
+
+	LastPregnancyHunger[Mother.handle:toString()] = nil
+	AppDataBase.appearanceData.fdata = fdata
+end
+
+local function IsStomachCriticallyDamaged(Mother)
+	local anatomy = Mother.medical.anatomy
+	for _, part in pairs(anatomy) do
+		if part and part.data and string.lower(part.data.name) == "stomach" then
+			if part.flesh < 0 then
+				return true
+			end
+		end
+	end
+	return false
 end
 
 local function ProgressPregnancy(Mother)
@@ -1020,14 +1100,24 @@ local function ProgressPregnancy(Mother)
 	end
 	
 	local PregnancyTimeRemaining = AppData.fdata.PregnancyEndTime
-	
 	if PregnancyTimeRemaining == nil then
 		return false
 	end
 	
 	PregnancyTimeRemaining = PregnancyTimeRemaining - GetCurrentTime()
-	--print(PregnancyTimeRemaining)
-	--print(Mother:getName(), PregnancyTimeRemaining)
+
+	-- Pérdida del embarazo si el estómago baja de 0
+	if IsStomachCriticallyDamaged(Mother) then
+		AppData.fdata.Stomach = AppData.fdata.Stomach_Original
+		AppData.fdata:remove("Stomach_Original")
+		AppData.fdata:remove("PregnancyEndTime")
+		AppData.bdata:remove("bJustSaidImPregnant")
+		AppDataBase.appearanceData = AppData
+
+		ClearPregnancyDebuffs(Mother)
+		Mother:say(MODSTRING_Miscarriage)
+		return true
+	end
 	
 	if PregnancyTimeRemaining <= 0 then 
 		AppData.fdata.Stomach = AppData.fdata.Stomach_Original
@@ -1036,11 +1126,10 @@ local function ProgressPregnancy(Mother)
 		AppData.bdata:remove("bJustSaidImPregnant")
 		AppDataBase.appearanceData = AppData
 		
+		ClearPregnancyDebuffs(Mother)
+
 		local Father = FindFatherOfCurrentChild(Mother)
-		--GetFamilyTable(Mother).FatherOfCurrentChild = nil
-		--Mother:setAppearanceData(AppData)
 		MakeChild(Mother, Father or Mother)
-		
 		return true
 	else
 		if bHappyFamiliesDebugMode then
@@ -1051,10 +1140,13 @@ local function ProgressPregnancy(Mother)
 			Mother:say(MODSTRING_ImPregnant)
 			AppData.bdata.bJustSaidImPregnant = true
 		end
-		local Lerp = 1.0 - (PregnancyTimeRemaining / TOTAL_PREGNANCY_TIME)
+
+		local Lerp = math.min(math.max(1.0 - (PregnancyTimeRemaining / TOTAL_PREGNANCY_TIME), 0.0), 1.0)
 		AppData.fdata.Stomach = AppData.fdata.Stomach_Original + (Lerp * 200)
+
+		ApplyPregnancyDebuffs(Mother, Lerp)
+
 		AppDataBase.appearanceData = AppData
-		--Mother:setAppearanceData(AppData)
 		return true
 	end
 end
@@ -1216,6 +1308,12 @@ local function UpdateCharacters()
 		ChildrenPerCharacter = {}
 		
 		for i, Character in pairs(PlayerCharacters) do
+			if HF_SyncCharacter then
+				local appData = Character:getAppearance().appearanceData
+				local isPreg = (appData.fdata.PregnancyEndTime ~= nil)
+				local genesStr = appData.sdata.HF_Genes or ""
+				HF_SyncCharacter(Character, isPreg, genesStr)
+			end
 			if Character:isHuman() then
 				UpdateMotherAndFatherName(Character)
 				CheckMother(Character)

@@ -1,0 +1,5 @@
+{
+    "Plugins": [
+        "plugin/Pregnancy_Update.dll"
+    ]
+}
