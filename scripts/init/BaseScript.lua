@@ -9,12 +9,12 @@ end
 --GetSettingsMenu()
 
 local bHappyFamiliesDebugMode = true
-local bNoCheck = true
+local bNoCheck = false
 
 --Time in days
 local TimeMultiplier = 1
-local TOTAL_PREGNANCY_TIME = 0.024 * TimeMultiplier
-local TOTAL_CHILDHOOD_TIME = 0.09 * TimeMultiplier
+local TOTAL_PREGNANCY_TIME = 9 * TimeMultiplier
+local TOTAL_CHILDHOOD_TIME = 18 * TimeMultiplier
 local TOTAL_ADULTHOOD_TIME = 100 * TimeMultiplier
 
 local CHILD_HEALTH_MULT = 0.3 
