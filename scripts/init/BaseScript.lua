@@ -19,8 +19,8 @@ local TOTAL_ADULTHOOD_TIME = 100 * TimeMultiplier
 
 local CHILD_HEALTH_MULT = 0.3 
 
-local TIMEBETWEENPREGNANCIES_MAX = 0.2 * TimeMultiplier
-local TIMEBETWEENPREGNANCIES_MIN = 0.1 * TimeMultiplier
+local TIMEBETWEENPREGNANCIES_MAX = 0.15 * TimeMultiplier
+local TIMEBETWEENPREGNANCIES_MIN = 0.5 * TimeMultiplier
 local PREGNANCYCHANCE = bNoCheck and 1 or 0.3
 
 local table_insert = table.insert
@@ -958,74 +958,129 @@ local function SetParentsAndAge(Mother, Father, Child)
 	--Child:setAge(0)
 end
 
-local function SetChildName(Mother, Father, Child)
+local function SetChildName(Mother, Father, Child, fallbackFatherName)
 	local CurrentRandomName = Child:getName()
-	local FatherName = Father:getName()
+	local FatherName = Father and Father:getName() or fallbackFatherName
+	if not FatherName then return end
+
 	local FatherNameSpaceLocation = string.find(FatherName, " ")
-	
 	if FatherNameSpaceLocation then
 		local FatherSurname = string.sub(FatherName, FatherNameSpaceLocation + 1, -1)
 		Child:setName(CurrentRandomName .. " " .. FatherSurname)		
 	end
 end
 
-local function MakeChild(Mother, Father)
+local function FindFatherForBirth(Mother)
+	local Father = FindFatherOfCurrentChild(Mother)
+	if Father then return Father end
 
-	local bCantReproduce = CoupleCantReproduce(Mother, Father)
-	
-	if bCantReproduce then 
-		Mother:say(bCantReproduce)
-		return 
+	local sdata = Mother:getAppearance().appearanceData.sdata
+	local fatherID = sdata.Preg_FatherID
+	local fatherName = sdata.Preg_FatherName
+
+	if fatherID and HAPPYFAMILIES_FamilyTable_StringToObject[fatherID] then
+		return HAPPYFAMILIES_FamilyTable_StringToObject[fatherID]
 	end
+
+	local playerObj = getPlayerInterface() or player
+	if playerObj then
+		local chars = playerObj:getAllPlayerCharacters()
+		for _, char in pairs(chars) do
+			if fatherID and char.handle:toString() == fatherID then
+				return char
+			end
+		end
+		-- Respaldo tras importar partida (donde los handles cambian)
+		if fatherName then
+			for _, char in pairs(chars) do
+				if not char:isFemale() and char:getName() == fatherName then
+					return char
+				end
+			end
+		end
+	end
+
+	return nil
+end
+
+local function MakeChild(Mother, Father, fallbackFatherName, fallbackFatherRace, fallbackChildGenes)
 	if not IsThereSpaceInSquad(Mother) then return end
 	
-	local AppearanceF = Father:getAppearance()
 	local AppearanceM = Mother:getAppearance()
+	local AppearanceF = Father and Father:getAppearance() or AppearanceM
 	
-	local playerObj = getPlayerInterface() or player
 	local faction = Mother:getFaction()
 	local factory = getRootObjectFactory()
 	local squad = Mother:getPlatoon()
-	local template = SelectRaceTemplate(Mother, Father)
-	--local template = (math.random() > 0.5) and Mother:getGameData() or Father:getGameData()
+
+	local template
+	if Father then
+		template = SelectRaceTemplate(Mother, Father)
+	else
+		local raceName = (math.random() > 0.5)
+			and Mother.myRace.data.name
+			or (fallbackFatherRace or Mother.myRace.data.name)
+		template = getGameWorld().gamedata:getDataByName("HF_Random" .. raceName, itemType.CHARACTER)
+	end
 	
 	local Child = factory:createRandomCharacter(
 		faction,
 		Mother:getPosition(),
-		squad, --Container
-		template or Mother:getGameData(), --Template
-		nil, --building
-		0.5 --age
+		squad,
+		template or Mother:getGameData(),
+		nil,
+		0.5
 	).handle:getCharacter()
 	
-	SetChildName(Mother, Father, Child)
+	SetChildName(Mother, Father, Child, fallbackFatherName)
 	
 	local AppearanceC = Child:getAppearance()
-	MixAppearances(
-		AppearanceM, 
-		AppearanceF, 
-		AppearanceC
-	)
+	MixAppearances(AppearanceM, AppearanceF, AppearanceC)
 
-	-- 1. Generar genes y guardar sdata reasignándolo explícitamente
-	if HF_GenerateGenes then
-		local genesStr = HF_GenerateGenes(Mother, Father, Child)
-		if genesStr and genesStr ~= "" then
-			local sdata = AppearanceC.appearanceData.sdata
-			sdata.HF_Genes = genesStr
-			AppearanceC.appearanceData.sdata = sdata
+	-- 1. Generar o restaurar genes híbridos
+	local genesStr = ""
+	if Father and HF_GenerateGenes then
+		genesStr = HF_GenerateGenes(Mother, Father, Child) or ""
+	elseif fallbackChildGenes and fallbackChildGenes ~= "" then
+		genesStr = fallbackChildGenes
+		if HF_SyncCharacter then
+			HF_SyncCharacter(Child, false, genesStr)
 		end
 	end
 
-	-- 2. Aplicar la apariencia base ANTES de escribir ComeOfAgeTime y sliders de crecimiento
+	if genesStr ~= "" then
+		local sdata = AppearanceC.appearanceData.sdata
+		sdata.HF_Genes = genesStr
+		AppearanceC.appearanceData.sdata = sdata
+	end
+
+	-- 2. Aplicar la apariencia base ANTES de escribir edad y sliders de crecimiento
 	Child:setAppearanceData(AppearanceC.appearanceData)
 	
-	-- 3. Ahora sí escribir edad, sliders de crecimiento, stats y aplicar el primer tick de crecimiento
-	SetParentsAndAge(Mother, Father, Child)
-	CopyFinalSliderValuesAndSetSliders(Mother, Father, Child)
-	MixStats(Mother, Father, Child)
+	-- 3. Escribir familia, edad, sliders de crecimiento y stats
+	if Father then
+		SetParentsAndAge(Mother, Father, Child)
+		CopyFinalSliderValuesAndSetSliders(Mother, Father, Child)
+		MixStats(Mother, Father, Child)
+	else
+		local ChildString = Child.handle:toString()
+		local MotherStringID = Mother.handle:toString()
+		HAPPYFAMILIES_FamilyTable_StringToObject[ChildString] = Child
+		local FamilyTable = GetOrAddFamilyTable(Child)
+		FamilyTable.MotherStringID = MotherStringID
+		FamilyTable.MotherName = Mother:getName()
+		FamilyTable.FatherStringID = nil
+		FamilyTable.FatherName = fallbackFatherName or MODSTRING_Unknown
+		SaveFamilyDataFromTable(Child)
+
+		local childApp = Child:getAppearance()
+		childApp.appearanceData.fdata.ComeOfAgeTime = GetCurrentTime() + TOTAL_CHILDHOOD_TIME
+
+		CopyFinalSliderValuesAndSetSliders(Mother, Mother, Child)
+		MixStats(Mother, Mother, Child)
+	end
+
 	GrowCharacter(Child)
-	
 	return Child
 end
 
@@ -1112,24 +1167,43 @@ local function ProgressPregnancy(Mother)
 		AppData.fdata:remove("Stomach_Original")
 		AppData.fdata:remove("PregnancyEndTime")
 		AppData.bdata:remove("bJustSaidImPregnant")
+		AppData.sdata:remove("Preg_FatherID")
+		AppData.sdata:remove("Preg_FatherName")
+		AppData.sdata:remove("Preg_FatherRace")
+		AppData.sdata:remove("Preg_ChildGenes")
 		AppDataBase.appearanceData = AppData
 
+		GetOrAddFamilyTable(Mother).FatherOfCurrentChild = nil
 		ClearPregnancyDebuffs(Mother)
 		Mother:say(MODSTRING_Miscarriage)
 		return true
 	end
 	
 	if PregnancyTimeRemaining <= 0 then 
+		if not IsThereSpaceInSquad(Mother) then
+			if bHappyFamiliesDebugMode then Mother:say("No space in squad") end
+			return true
+		end
+
+		local Father = FindFatherForBirth(Mother)
+		local savedFatherName = AppData.sdata.Preg_FatherName
+		local savedFatherRace = AppData.sdata.Preg_FatherRace
+		local savedChildGenes = AppData.sdata.Preg_ChildGenes
+
 		AppData.fdata.Stomach = AppData.fdata.Stomach_Original
 		AppData.fdata:remove("Stomach_Original")
 		AppData.fdata:remove("PregnancyEndTime")
 		AppData.bdata:remove("bJustSaidImPregnant")
+		AppData.sdata:remove("Preg_FatherID")
+		AppData.sdata:remove("Preg_FatherName")
+		AppData.sdata:remove("Preg_FatherRace")
+		AppData.sdata:remove("Preg_ChildGenes")
 		AppDataBase.appearanceData = AppData
-		
+
+		GetOrAddFamilyTable(Mother).FatherOfCurrentChild = nil
 		ClearPregnancyDebuffs(Mother)
 
-		local Father = FindFatherOfCurrentChild(Mother)
-		MakeChild(Mother, Father or Mother)
+		MakeChild(Mother, Father, savedFatherName, savedFatherRace, savedChildGenes)
 		return true
 	else
 		if bHappyFamiliesDebugMode then
@@ -1152,18 +1226,37 @@ local function ProgressPregnancy(Mother)
 end
 
 local function MakePregnant(Mother, Father)
-	--if CoupleCantReproduce(Mother, Father) then return end
-	
 	local AppDataBase = Mother:getAppearance()
 	local AppData = AppDataBase.appearanceData
 	
 	local fdata = AppData.fdata
+	local sdata = AppData.sdata
 	
 	if fdata.PregnancyEndTime then return end
 	
 	fdata.Stomach_Original = AppData.fdata.Stomach
 	fdata.PregnancyEndTime = GetCurrentTime() + TOTAL_PREGNANCY_TIME
+
+	if Father then
+		sdata.Preg_FatherID = Father.handle:toString()
+		sdata.Preg_FatherName = Father:getName()
+		if Father.myRace and Father.myRace.data then
+			sdata.Preg_FatherRace = Father.myRace.data.name
+		end
+		-- Pre-generar genes en sdata como respaldo si el padre muere o se importa la partida
+		if HF_GenerateGenes then
+			local preGenes = HF_GenerateGenes(Mother, Father, Mother)
+			if preGenes and preGenes ~= "" then
+				sdata.Preg_ChildGenes = preGenes
+			end
+			if HF_SyncCharacter then
+				HF_SyncCharacter(Mother, true, sdata.HF_Genes or "NONE")
+			end
+		end
+	end
+
 	AppData.fdata = fdata
+	AppData.sdata = sdata
 	AppDataBase.appearanceData = AppData
 	
 	GetOrAddFamilyTable(Mother).FatherOfCurrentChild = Father
