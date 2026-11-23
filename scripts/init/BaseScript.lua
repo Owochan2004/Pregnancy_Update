@@ -1,4 +1,3 @@
-
 local function GetSettingsMenu()
 	local Windows = getForgottenGUI().guiWindows
 	for K in pairs(Windows) do
@@ -27,6 +26,12 @@ local table_insert = table.insert
 
 local HAPPYFAMILIES_FamilyTable_StringToObject = {}
 local HAPPYFAMILIES_FamilyTable_ObjectToTable = {}
+local ChildrenPerCharacter = {}
+local LastPregnancyHunger = {}
+
+local LastGameWorld = nil
+local LastPlayerObj = nil
+local counter = 0
 
 --Edit these global vals in another file to create translation: e.g.
 --MODSTRING_Children = "你没有孩子呀，天啊"
@@ -51,15 +56,68 @@ local function GetCurrentTime()
 	return getGameWorld():getTimeStamp_inGameHours():getTotalDays()
 end
 
---getForgottenGUI():getInventoryWindow()
+local FamilyWindow
+local FamilyWindow_FatherText
+local FamilyWindow_MotherText
+local FamilyWindow_ChildrenText
 
---MyGUI.createButton(skin, left, top, width, height, name, parentOrLayer)
+function FamilyWindow_Close()
+	if FamilyWindow then
+		pcall(function() FamilyWindow:destroy() end)
+		FamilyWindow = nil
+		FamilyWindow_FatherText = nil
+		FamilyWindow_MotherText = nil
+		FamilyWindow_ChildrenText = nil
+	end
+end
 
---registerHandler("onPlayerSerialise", FamilyTree_Save)
---registerHandler("onPlayerLoadFromSerialise", FamilyTree_Load)
+local function IsValidCharacter(char)
+	if not char then return false end
+	local ok, valid = pcall(function()
+		if char.handle == nil then return false end
+		if char.handle.isValid then
+			return char.handle:isValid()
+		end
+		local id = char.handle:toString()
+		return id ~= nil and id ~= ""
+	end)
+	return ok and valid
+end
+
+local function ResetModSessionState()
+	HAPPYFAMILIES_FamilyTable_StringToObject = {}
+	HAPPYFAMILIES_FamilyTable_ObjectToTable = {}
+	ChildrenPerCharacter = {}
+	LastPregnancyHunger = {}
+	counter = 0
+	FamilyWindow_Close()
+end
+
+local function CheckAndResetOnReload()
+	local ok, world, playerObj = pcall(function()
+		return getGameWorld(), (getPlayerInterface() or player)
+	end)
+
+	if not ok or not world or not playerObj then
+		ResetModSessionState()
+		LastGameWorld = nil
+		LastPlayerObj = nil
+		return false
+	end
+
+	if world ~= LastGameWorld or playerObj ~= LastPlayerObj then
+		ResetModSessionState()
+		LastGameWorld = world
+		LastPlayerObj = playerObj
+		return false
+	end
+
+	return true
+end
 
 local function IsThereSpaceInSquad(Character)
 	local Platoon = Character:getPlatoon()
+	if not Platoon then return false end
 	
 	--If squad too big
 	if (Platoon:getSquadSize() + 1) >= getGlobalConstants().MAX_SQUAD_SIZE then
@@ -67,6 +125,7 @@ local function IsThereSpaceInSquad(Character)
 	end
 	
 	local PlayerObj = getPlayerInterface() or player
+	if not PlayerObj or not PlayerObj.playerCharacters then return false end
 	
 	--If faction too big
 	if (PlayerObj.playerCharacters:size() + 1) >= getGlobalConstants().MAX_FACTION_SIZE then
@@ -78,9 +137,8 @@ end
 
 
 local function IsInPlayerFaction(character)
-	
 	local PlayerObj = getPlayerInterface() or player
-	local faction = playerObj:getFaction()
+	local faction = PlayerObj:getFaction()
 	return character:getFaction():getName() == faction:getName()
 end
 
@@ -97,22 +155,33 @@ end
 
 local function FindFather(Child)
 	local FamilyTable = GetFamilyTable(Child)
-	if not FamilyTable then return end
+	if not FamilyTable then return nil end
 	local FatherStringID = FamilyTable.FatherStringID
-	return HAPPYFAMILIES_FamilyTable_StringToObject[FatherStringID]
+	if not FatherStringID then return nil end
+	local Father = HAPPYFAMILIES_FamilyTable_StringToObject[FatherStringID]
+	if IsValidCharacter(Father) then
+		return Father
+	end
+	HAPPYFAMILIES_FamilyTable_StringToObject[FatherStringID] = nil
+	return nil
 end
 
 local function FindMother(Child)	
 	local FamilyTable = GetFamilyTable(Child)
-	if not FamilyTable then return end
+	if not FamilyTable then return nil end
 	local MotherStringID = FamilyTable.MotherStringID
-	return HAPPYFAMILIES_FamilyTable_StringToObject[MotherStringID]
+	if not MotherStringID then return nil end
+	local Mother = HAPPYFAMILIES_FamilyTable_StringToObject[MotherStringID]
+	if IsValidCharacter(Mother) then
+		return Mother
+	end
+	HAPPYFAMILIES_FamilyTable_StringToObject[MotherStringID] = nil
+	return nil
 end
 
 
 --If mother or father is dead or despawned, use this instead
 local function FindMotherName(Child, bAddDeceasedString)
-	
 	local Mother = FindMother(Child)
 	
 	if Mother then
@@ -130,8 +199,6 @@ local function FindMotherName(Child, bAddDeceasedString)
 		
 		return MODSTRING_Unknown
 	end
-	
-	
 end
 
 local function FindFatherName(Child, bAddDeceasedString)
@@ -151,7 +218,6 @@ local function FindFatherName(Child, bAddDeceasedString)
 		end		
 		return MODSTRING_Unknown
 	end
-	
 end
 
 --Update mother and father name so they can be stored if character is despawned or dies
@@ -171,61 +237,55 @@ end
 
 local function FindFatherOfCurrentChild(Mother)
 	local FamilyTable = GetFamilyTable(Mother)
-	return FamilyTable and FamilyTable.FatherOfCurrentChild
+	if not FamilyTable then return nil end
+
+	if FamilyTable.FatherOfCurrentChildID then
+		local Father = HAPPYFAMILIES_FamilyTable_StringToObject[FamilyTable.FatherOfCurrentChildID]
+		if IsValidCharacter(Father) then
+			return Father
+		end
+	end
+
+	if IsValidCharacter(FamilyTable.FatherOfCurrentChild) then
+		return FamilyTable.FatherOfCurrentChild
+	end
+
+	FamilyTable.FatherOfCurrentChild = nil
+	return nil
 end
 
 local function LerpFloat(A, B, LerpVal)
 	return A + (LerpVal * (B - A))
 end
 
-
-local FamilyWindow
-local FamilyWindow_FatherText
-local FamilyWindow_MotherText
-local FamilyWindow_ChildrenText
-
-function FamilyWindow_Close()
-	if FamilyWindow then
-		FamilyWindow:destroy()
-		FamilyWindow = nil
-		FamilyWindow_FatherText = nil
-		FamilyWindow_MotherText = nil
-		FamilyWindow_ChildrenText = nil
-	end
-end
-
 function FamilyWindow_SetText(Character)
+	if not IsValidCharacter(Character) then return end
 	if Character:isAnimal() then return end
 	if not FamilyWindow then return end
 	
 	FamilyWindow:setCaption(MODSTRING_FamilyTree .. Character:getName())
 	
-	--local Father = FindFather(Character)
 	FamilyWindow_FatherText:setCaption(MODSTRING_Father .. FindFatherName(Character, true))
-	
-	--local Mother = FindMother(Character)
 	FamilyWindow_MotherText:setCaption(MODSTRING_Mother .. FindMotherName(Character, true))
 	
 	local Children = ChildrenPerCharacter_Get(Character)
+	local ValidNames = {}
+	if Children then
+		for i = 1, #Children do
+			if IsValidCharacter(Children[i]) then
+				table_insert(ValidNames, Children[i]:getName())
+			end
+		end
+	end
 	
 	local ChildrenString
-	
-	if Children then
-		ChildrenString = MODSTRING_Children .. Children[1]:getName()
-		for i = 2, #Children do
-			ChildrenString = ChildrenString .. ", " .. Children[i]:getName()
-		end
+	if #ValidNames > 0 then
+		ChildrenString = MODSTRING_Children .. table.concat(ValidNames, ", ")
 	else
 		ChildrenString = MODSTRING_NoChildren
 	end
 	
 	FamilyWindow_ChildrenText:setCaption(ChildrenString)
-	
-	--[[
-	Button:registerCallback("MouseButtonClick", function(sender)
-		print("Button clicked:", sender.caption)
-	end)
-	--]]
 end
 
 local function RecruitCharacter(character)
@@ -239,41 +299,16 @@ local function RecruitCharacter(character)
 end
 
 local function OnSelectCharacter(character)
-	if not character then return end -- <-- PONER PRIMERO
-	--print(character.medical.hunger, character.medical.fed) 
-	
-	--print(GetFamilyTable(character).MotherName)
-	--print(character.myRace.data.stringID, character.myRace.data.currentID)
-	if character:isAnimal() then return end	
-	if not character:isPlayerCharacter() then 
-		if false then RecruitCharacter(character) end
-		return 
-	end
-	FamilyWindow_SetText(character)
-	
-	
-	
-	--g_GetAncestorList(character, 3, nil, true)
-	--[[
-	character.stats.polearms = 100
-	character.stats.massCombat = 100
-	character.stats.fitness = 100
-	character.stats.meleeAttack = 100
-	character.stats.meleeDefence = 100
-	character.stats.athletics = 100
-	character.stats.dexterity = 100
-	character.stats.strength = 100
-	--]]
-	--character:takeMoney(-10000)
-	--[[
-	local AppData = character:getAppearanceData()
-	
-	for k, v in pairs(AppData.fdata) do
-		print(k, v)
-	end
-	--]]
-	--local AppDataBase = character:getAppearance()
-	--print(AppData.beard)
+	pcall(function()
+		if not CheckAndResetOnReload() then return end
+		if not IsValidCharacter(character) then return end
+		if character:isAnimal() then return end	
+		if not character:isPlayerCharacter() then 
+			if false then RecruitCharacter(character) end
+			return 
+		end
+		FamilyWindow_SetText(character)
+	end)
 end
 Events.on("Character::_NV_select", OnSelectCharacter)
 
@@ -313,7 +348,6 @@ local function FamilyWindow_AddTextWidgets(Character)
 end
 
 local function FamilyWindow_OnOpen(input_handler, key_code)
-
 	--33 is F
 	if key_code ~= 33 then 
 		return 
@@ -323,10 +357,13 @@ local function FamilyWindow_OnOpen(input_handler, key_code)
 		FamilyWindow_Close()
 		return 
 	end
+
+	if not CheckAndResetOnReload() then return end
 	
 	local selectedCharacter = getPlayerInterface().selectedCharacter
 	if not selectedCharacter then return end
 	selectedCharacter = selectedCharacter:getCharacter()
+	if not IsValidCharacter(selectedCharacter) then return end
 	if not selectedCharacter:isPlayerCharacter() then return end
 	if selectedCharacter:isAnimal() then return end
 
@@ -337,7 +374,7 @@ local function FamilyWindow_OnOpen(input_handler, key_code)
 		"Window"
 	)
 	
-		FamilyWindow:registerCallback("eventWindowButtonPressed", function(sender)
+	FamilyWindow:registerCallback("eventWindowButtonPressed", function(sender)
 		if FamilyWindow then 
 			FamilyWindow_Close()
 		end
@@ -407,18 +444,11 @@ local RaceStringIDToName = {
 	["2603-gamedata.base"] = "Cannibal",
 	["50523-rebirth.mod"] = "CannibalSkav"
 }
---[[
-local RaceToTemplateName = {
-	Shek = "HF_RandomShek",
-	Greenlander = "HF_RandomGreenlander",
-	Scorchlander = "HF_RandomScorchlander",
-	Cannibal = "HF_RandomCannibal",
-	CannibalSkav = "HF_RandomCannibalSkav"
-}
---]]
+
 local function RaceTypeCanReproduce(Character)
+	if not Character.myRace or not Character.myRace.data then return nil end
 	local RaceName = RaceStringIDToName[Character.myRace.data.stringID]
-	if not RaceName then return nil end -- <-- AGREGAR ESTA LÍNEA
+	if not RaceName then return nil end
 	local RaceTemplateName = "HF_Random" .. RaceName
 	local RaceTemplate = getGameWorld().gamedata:getDataByName(RaceTemplateName, itemType.CHARACTER)
 	return RaceTemplate 
@@ -428,7 +458,7 @@ end
 local function GetAncestorList(Character, Iterations, OutTable, bDebugMode)
 	OutTable = OutTable or {}
 	
-	if not Character then return OutTable end
+	if not IsValidCharacter(Character) then return OutTable end
 	
 	OutTable[Character] = true
 	
@@ -443,9 +473,8 @@ local function GetAncestorList(Character, Iterations, OutTable, bDebugMode)
 	
 	if bDebugMode and bHappyFamiliesDebugMode then
 		local String = Character:getName() .. "'s ancestors: "
-		local Ancestor
 		for Ancestor in pairs(OutTable) do
-			if Ancestor then
+			if IsValidCharacter(Ancestor) then
 				String = String .. Ancestor:getName() .. ", "
 			end
 		end
@@ -459,8 +488,6 @@ end
 g_GetAncestorList = GetAncestorList
 
 local function CoupleCantReproduce(Mother, Father)
-	--if Mother == Father then return end
-	
 	local NextAllowedChildCheck = Mother:getAppearanceData().fdata.NextAllowedChildCheck
 	if NextAllowedChildCheck 
 	and GetCurrentTime() < NextAllowedChildCheck then
@@ -491,7 +518,6 @@ end
 
 local function SelectRaceTemplate(Mother, Father)
 	local RaceName = (math.random() > 0.5) and Mother.myRace.data.name or Father.myRace.data.name
-	--print("HF_Random" .. RaceName)
 	return getGameWorld().gamedata:getDataByName("HF_Random" .. RaceName, itemType.CHARACTER)
 end
 
@@ -536,24 +562,6 @@ local ChildSliderValues_Shek = {
 	["bone_overbite"] = 0.17,
 	["bone_wide_cheeks"] = 0.97,
 	["bone_wide_chin"] = -0.26
-	
-	--[[
-	["bone_wide_cheekbones"] = 20,
-	["bone_wide_cheeks"] = 100,
-	["bone_long_nose"] = 0,
-	["bone_arch_nose"] = -70,
-	["bone_high_nose"] = -80,
-	["bone_tiltup_nose"] = 120,
-	["bone_high_brows"] = 80,
-	["bone_tiltdown_brow"] = 0,
-	["bone_big_eyes"] = 120,
-	["bone_tiltup_eyes"] = 0,
-	["bone_high_eyes"] = -100,
-	["bone_wide_jaw"] = 0,
-	["bone_outward_chin"] = 0,
-	["bone_overbite"] = 100,
-	["bone_down_chin"] = -100
-	--]]
 }
 
 local ChildSliderValues = {
@@ -567,47 +575,12 @@ local ChildSliderValues = {
 	["Breast size"] = 25,
 	["Breast height"] = 100,
 	["Arm bulk"] = 70,
-	--["Mid-section"] = 30,
 	["Waist"] = 100,
 	["Stomach"] = 90,
 	["Hips"] = 75,
 	["Legs bulk"] = 90,
 	["Legs shape"] = 100,
 	["Feet"] = 110,
-	--[[
-	["Head size"] = 110,
-	["Head shape"] = 105,
-	["Neck"] = 80,
-	["Neck length"] = 90,
-	["Jaw"] = 90,
-	["Cheekbones"] = 17,
-	["Nose length"] = -10,
-	["Nose arch"] = -110,
-	["Nose position"] = -60,
-	["Nose tilt"] = 50,
-	["Brow position"] = 90,
-	["Eyes size"] = 100,
-	["Eyes height"] = -70,
-	["Chin depth"] = 70,
-	["Cheeks"] = 100
-	--]]
-	--[[
-	["Head size"] = 110,
-	["Head shape"] = 110,
-	["Neck"] = 80,
-	["Neck length"] = 90,
-	["wide_jaw"] = 90,
-	["wide_cheekbones"] = 20,
-	["long_nose"] = -10,
-	["Narch_nose"] = -110,
-	["high_nose"] = -60,
-	["tiltup_nose"] = 50,
-	["high_brows"] = 90,
-	["big_eyes"] = 120,
-	["high_eyes"] = -70,
-	["underbite"] = 70,
-	["wide_cheeks"] = 100
-	--]]
 	["Head size"] = 90,
 	["Head shape"] = 110,
 	["Neck"] = 80,
@@ -662,26 +635,6 @@ local AllSliderValues = {
 	"Neck",
 	"Neck width",
 	"Neck length",
-	--[[
-	"Jaw",
-	"Cheekbones",
-	"Mouth size",
-	"Mouth width",
-	"Nose width",
-	"Nose length",
-	"Nose arch",
-	"Nose position",
-	"Nose tilt",
-	"Brow position",
-	"Brow tilt",
-	"Eyes depth",
-	"Eyes narrow",
-	"Eyes closeness",
-	"Eyes tilt",
-	"Eyes height",
-	"Eyes size",
-	"Chin depth",
-	--]]
 	"Height",
 	"Frame",
 	"Posture",
@@ -785,7 +738,6 @@ local function RemoveFinalSliderValues(Child)
 		fdata:remove("WHENADULT_" .. k)
 	end
 	
-	
 	local Anatomy = Child.medical.anatomy
 	for k, v in pairs(Anatomy) do
 		fdata:remove("WHENADULT_LIMB_" .. k)
@@ -857,7 +809,6 @@ local function GrowCharacter(Character)
 	
 	Character.medical.anatomy = Anatomy
 	
-	
 	local SliderValues = GetChildSliderValues(Character)
 	
 	local FinalVal
@@ -866,16 +817,10 @@ local function GrowCharacter(Character)
 		
 		if FinalVal then		
 			fdata[k] = LerpFloat(ChildVal, FinalVal, Lerp)
-			--print(k, ChildVal, FinalVal, Lerp)
 		end
 	end
-	--[[
-	for k, v in pairs(fdata) do
-		print(k, v)
-	end
-	--]]
+
 	AppDataBase.appearanceData.fdata = fdata
-	
 	
 	if RemainingTimeAsChild <= 0 then
 		AppDataBase.appearanceData.idata:remove("ComeOfAgeTime")
@@ -883,9 +828,6 @@ local function GrowCharacter(Character)
 		RemoveFinalSliderValues(Character)
 	end
 	
-	--AppDataBase.characterHeight = fdata.Height * 2
-	--Character:setAppearanceData(AppDataBase.appearanceData)
-	--AppDataBase.updateBody = true
 	AppDataBase.updatedAppearanceData = true
 	return true
 end
@@ -911,8 +853,6 @@ local function MixAppearances(M, F, C)
 
 	C.appearanceData.vecdata["Skin Tone"] = SkinColour_C	
 	
-	--C.characterHeight = LerpFloat(M.characterHeight, F.characterHeight, math.random())
-	
 	local Value_M, Value_F
 	
 	for i, SliderKey in ipairs(AllSliderValues) do
@@ -929,7 +869,6 @@ local function MixAppearances(M, F, C)
 	
 	C.appearanceData.sdata.beard = ""
 	C.appearanceData.fdata = FValues_C
-	--return C
 end
 
 local function MixStats(Mother, Father, Child)
@@ -955,7 +894,6 @@ local function SetParentsAndAge(Mother, Father, Child)
 	AppDataBase.appearanceData.fdata.ComeOfAgeTime = GetCurrentTime() + TOTAL_CHILDHOOD_TIME
 	
 	AppDataBase.appearanceData.idata = idata
-	--Child:setAge(0)
 end
 
 local function SetChildName(Mother, Father, Child, fallbackFatherName)
@@ -978,7 +916,7 @@ local function FindFatherForBirth(Mother)
 	local fatherID = sdata.Preg_FatherID
 	local fatherName = sdata.Preg_FatherName
 
-	if fatherID and HAPPYFAMILIES_FamilyTable_StringToObject[fatherID] then
+	if fatherID and IsValidCharacter(HAPPYFAMILIES_FamilyTable_StringToObject[fatherID]) then
 		return HAPPYFAMILIES_FamilyTable_StringToObject[fatherID]
 	end
 
@@ -986,14 +924,16 @@ local function FindFatherForBirth(Mother)
 	if playerObj then
 		local chars = playerObj:getAllPlayerCharacters()
 		for _, char in pairs(chars) do
-			if fatherID and char.handle:toString() == fatherID then
-				return char
+			if IsValidCharacter(char) then
+				if fatherID and char.handle:toString() == fatherID then
+					return char
+				end
 			end
 		end
 		-- Respaldo tras importar partida (donde los handles cambian)
 		if fatherName then
 			for _, char in pairs(chars) do
-				if not char:isFemale() and char:getName() == fatherName then
+				if IsValidCharacter(char) and not char:isFemale() and char:getName() == fatherName then
 					return char
 				end
 			end
@@ -1084,8 +1024,6 @@ local function MakeChild(Mother, Father, fallbackFatherName, fallbackFatherRace,
 	return Child
 end
 
-local LastPregnancyHunger = {}
-
 local function ApplyPregnancyDebuffs(Mother, Lerp)
 	local fdata = Mother:getAppearance().appearanceData.fdata
 	local stats = Mother.stats
@@ -1173,7 +1111,9 @@ local function ProgressPregnancy(Mother)
 		AppData.sdata:remove("Preg_ChildGenes")
 		AppDataBase.appearanceData = AppData
 
-		GetOrAddFamilyTable(Mother).FatherOfCurrentChild = nil
+		local ft = GetOrAddFamilyTable(Mother)
+		ft.FatherOfCurrentChild = nil
+		ft.FatherOfCurrentChildID = nil
 		ClearPregnancyDebuffs(Mother)
 		Mother:say(MODSTRING_Miscarriage)
 		return true
@@ -1200,7 +1140,9 @@ local function ProgressPregnancy(Mother)
 		AppData.sdata:remove("Preg_ChildGenes")
 		AppDataBase.appearanceData = AppData
 
-		GetOrAddFamilyTable(Mother).FatherOfCurrentChild = nil
+		local ft = GetOrAddFamilyTable(Mother)
+		ft.FatherOfCurrentChild = nil
+		ft.FatherOfCurrentChildID = nil
 		ClearPregnancyDebuffs(Mother)
 
 		MakeChild(Mother, Father, savedFatherName, savedFatherRace, savedChildGenes)
@@ -1237,7 +1179,7 @@ local function MakePregnant(Mother, Father)
 	fdata.Stomach_Original = AppData.fdata.Stomach
 	fdata.PregnancyEndTime = GetCurrentTime() + TOTAL_PREGNANCY_TIME
 
-	if Father then
+	if Father and IsValidCharacter(Father) then
 		sdata.Preg_FatherID = Father.handle:toString()
 		sdata.Preg_FatherName = Father:getName()
 		if Father.myRace and Father.myRace.data then
@@ -1259,11 +1201,14 @@ local function MakePregnant(Mother, Father)
 	AppData.sdata = sdata
 	AppDataBase.appearanceData = AppData
 	
-	GetOrAddFamilyTable(Mother).FatherOfCurrentChild = Father
+	local ft = GetOrAddFamilyTable(Mother)
+	ft.FatherOfCurrentChild = nil
+	ft.FatherOfCurrentChildID = (Father and IsValidCharacter(Father)) and Father.handle:toString() or nil
 end
 
 local function CheckMotherAndFather(Mother, Father)
 	if Father == Mother then return end
+	if not IsValidCharacter(Father) then return end
 	if Father:isFemale() then return end
 	
 	local bCantReproduce = CoupleCantReproduce(Mother, Father)
@@ -1304,7 +1249,6 @@ local function CheckMother(Character)
 	local handInsideThis = Character.inWhat
 	if not handInsideThis then return end
 	local InsideBuilding = handInsideThis:getBuilding()
-	local InsideItem = handInsideThis:getItem()
 	
 	if InsideBuilding then
 		if not IsBed(InsideBuilding) then return end
@@ -1315,20 +1259,13 @@ local function CheckMother(Character)
 		local handOperators = UseableStuff.currentOperators
 
 		for K in pairs(handOperators) do
-			local Father = K:getCharacter()
-			if Father then
+			local Father = K and K:getCharacter() or nil
+			if IsValidCharacter(Father) then
 				CheckMotherAndFather(Character, Father)
 			end
 		end
 	end
 end
-
---Character:hitByMeleeAttack(0, Father,  0)
-
-local counter = 0
-
-local ChildrenPerCharacter = {}
-
 
 local function ChildrenPerCharacter_AddToParents(Character)
 	local Father = FindFather(Character)
@@ -1353,12 +1290,11 @@ local function ChildrenPerCharacter_AddToParents(Character)
 		
 		table_insert(ChildrenPerCharacter[MotherID], Character)
 	end
-	
 end
 
 function ChildrenPerCharacter_Get(Character)
+	if not IsValidCharacter(Character) then return nil end
 	local CharacterID = Character.handle:toString()
-	
 	return ChildrenPerCharacter[CharacterID]
 end
 
@@ -1374,7 +1310,7 @@ function GetCharacterFromID_OLD(CharacterInstanceID)
 	
 	local Characters = getPlayerInterface():getAllPlayerCharacters()
 	for i, Char in pairs(Characters) do
-		if Char:getAppearanceData().idata.CharacterID == CharacterInstanceID then
+		if IsValidCharacter(Char) and Char:getAppearanceData().idata.CharacterID == CharacterInstanceID then
 			return Char
 		end
 	end
@@ -1382,45 +1318,54 @@ end
 
 
 local function UpdateCharacters()
-	--local InputInstance = InputManager:getInstance()
-	
-	--local Widget = InputInstance:getMouseFocusWidget()
-	--print(Widget)
-	
-	--InitCharacterTopIndex()
-	
-    counter = counter + 1
+	pcall(function()
+		if not CheckAndResetOnReload() then return end
 
-    if counter >= 40 then
-		counter = 1
-		
-		local playerObj = getPlayerInterface() or player
-		local faction = playerObj:getFaction()
-		local PlayerCharacters = playerObj:getAllPlayerCharacters()
-		
-		ChildrenPerCharacter = {}
-		
-		for i, Character in pairs(PlayerCharacters) do
-			if HF_SyncCharacter then
-				local appData = Character:getAppearance().appearanceData
-				local isPreg = (appData.fdata.PregnancyEndTime ~= nil)
-				local genesStr = appData.sdata.HF_Genes or ""
-				HF_SyncCharacter(Character, isPreg, genesStr)
+		counter = counter + 1
+
+		if counter >= 40 then
+			counter = 1
+			
+			local playerObj = getPlayerInterface() or player
+			if not playerObj then return end
+			local PlayerCharacters = playerObj:getAllPlayerCharacters()
+			if not PlayerCharacters then return end
+			
+			-- Reconstruir cachés de sesión desde los personajes vivos actuales
+			ChildrenPerCharacter = {}
+			HAPPYFAMILIES_FamilyTable_StringToObject = {}
+			HAPPYFAMILIES_FamilyTable_ObjectToTable = {}
+
+			local LiveCharacters = {}
+			for _, Character in pairs(PlayerCharacters) do
+				if IsValidCharacter(Character) then
+					HAPPYFAMILIES_FamilyTable_StringToObject[Character.handle:toString()] = Character
+					table_insert(LiveCharacters, Character)
+				end
 			end
-			if Character:isHuman() then
-				UpdateMotherAndFatherName(Character)
-				CheckMother(Character)
-				ChildrenPerCharacter_AddToParents(Character)
+			
+			for _, Character in ipairs(LiveCharacters) do
+				if HF_SyncCharacter then
+					local appData = Character:getAppearance().appearanceData
+					local isPreg = (appData.fdata.PregnancyEndTime ~= nil)
+					local genesStr = appData.sdata.HF_Genes or ""
+					HF_SyncCharacter(Character, isPreg, genesStr)
+				end
+				if Character:isHuman() then
+					UpdateMotherAndFatherName(Character)
+					CheckMother(Character)
+					ChildrenPerCharacter_AddToParents(Character)
+				end
 			end
 		end
-    end
+	end)
 end
 
 local handlerId = Events.on("GameWorld::charsUpdate", UpdateCharacters)
 
 
 function GetFamilyTable(Character)
-	if not Character then return end
+	if not IsValidCharacter(Character) then return nil end
 	
 	local CharacterStringID = Character.handle:toString()
 	local FamilyTable = HAPPYFAMILIES_FamilyTable_ObjectToTable[CharacterStringID]
@@ -1435,7 +1380,7 @@ function GetFamilyTable(Character)
 end
 
 function GetOrAddFamilyTable(Character)
-	if not Character then return end
+	if not IsValidCharacter(Character) then return nil end
 	local CharacterStringID = Character.handle:toString()
 	local FamilyTable = HAPPYFAMILIES_FamilyTable_ObjectToTable[CharacterStringID]
 	
@@ -1454,7 +1399,6 @@ function GetOrAddFamilyTable(Character)
 end
 
 
----[[
 local function GetSaveFilePath(bTemp)
 	local Singleton = SaveManager.getSingleton()
 	local FileName 
@@ -1495,8 +1439,11 @@ function SaveFamilyDataFromTable(Character)
 		FamilyTable.FatherStringID or "no" --5
 	}
 			
-	if FamilyTable.FatherOfCurrentChild then
-		table_insert(StringList, FamilyTable.FatherOfCurrentChild.handle:toString())
+	local CurrentFather = FindFatherOfCurrentChild(Character)
+	if CurrentFather then
+		table_insert(StringList, CurrentFather.handle:toString())
+	elseif FamilyTable.FatherOfCurrentChildID then
+		table_insert(StringList, FamilyTable.FatherOfCurrentChildID)
 	end
 	
 	local SerialisedString = table.concat(StringList, ";")
@@ -1515,7 +1462,6 @@ end
 
 function LoadAllFamilyDataFromString_Character(Character)
 	local SingleDataString = Character:getAppearance().appearanceData.sdata.FamilyTable
-	--print("LoadAllFamilyDataFromString_Character", SingleDataString)
 	return SingleDataString and LoadAllFamilyDataFromString_Single(SingleDataString)
 end
 
@@ -1529,15 +1475,14 @@ function LoadAllFamilyDataFromString_Single(SingleDataString)
 	local Table = {}
 	
 	if #ThisCharacterStringTable >= 5 then
-		local Character = HAPPYFAMILIES_FamilyTable_StringToObject[ThisCharacterStringTable[1]]
-		
 		Table.MotherName = _Verify(ThisCharacterStringTable[2])
 		Table.MotherStringID = _Verify(ThisCharacterStringTable[3])
 		Table.FatherName = _Verify(ThisCharacterStringTable[4])
 		Table.FatherStringID = _Verify(ThisCharacterStringTable[5])
 		
 		if ThisCharacterStringTable[6] then
-			Table.FatherOfCurrentChild = HAPPYFAMILIES_FamilyTable_StringToObject[ThisCharacterStringTable[6]]
+			Table.FatherOfCurrentChildID = ThisCharacterStringTable[6]
+			Table.FatherOfCurrentChild = nil
 		end
 		
 		return Table
@@ -1547,17 +1492,16 @@ function LoadAllFamilyDataFromString_Single(SingleDataString)
 end
 
 function LoadAllFamilyDataFromString(DataStrings)
-
 	HAPPYFAMILIES_FamilyTable_StringToObject = {}
 	
-	--Create tables for characters
 	local Characters = getPlayerInterface():getAllPlayerCharacters()
 	for i, Char in pairs(Characters) do
-		HAPPYFAMILIES_FamilyTable_StringToObject[Char.handle:toString()] = Char
-		local Table = GetOrAddFamilyTable(Char)
+		if IsValidCharacter(Char) then
+			HAPPYFAMILIES_FamilyTable_StringToObject[Char.handle:toString()] = Char
+			GetOrAddFamilyTable(Char)
+		end
 	end
 
-	
 	for i, Strings in pairs(DataStrings) do
 		LoadAllFamilyDataFromString_Single(Strings)
 	end	
@@ -1565,9 +1509,7 @@ end
 
 
 local function LoadFamilyData(Player, GameData)
-	-- Open file for writing (creates or overwrites the file)
 	local SaveFilePath = GetSaveFilePath()
-	
 	local File = io.open(SaveFilePath, "w")
 	
 	if not File then
@@ -1581,39 +1523,29 @@ local function LoadFamilyData(Player, GameData)
     end
 	
 	File:close()
-	
 	LoadAllFamilyDataFromString(Strings)
-    
-	
-    --return Strings
 end
 
 local function SaveFamilyData(Player, GameData)
 	local SaveFilePath = GetSaveFilePath()
-	
 	local File = io.open(SaveFilePath, "w")
 	
     if not File then
         return false
     end
 	
-	
 	local Characters = getPlayerInterface():getAllPlayerCharacters()
 	local StringPerChar
 	
 	for i, Char in pairs(Characters) do
-		StringPerChar = pcall(SaveFamilyDataFromTable, Char)
-		
-		if StringPerChar then
-			File:write(StringPerChar, "\n")
+		if IsValidCharacter(Char) then
+			local ok, res = pcall(SaveFamilyDataFromTable, Char)
+			if ok and res then
+				File:write(res, "\n")
+			end
 		end
     end
 
     File:close()
     return true
 end
-
---LoadFamilyData()
-
---registerHandler("onPlayerLoadFromSerialise", LoadFamilyData)
---registerHandler("onPlayerSerialise", SaveFamilyData)
